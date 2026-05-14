@@ -3,318 +3,226 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=correction/lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
 require_root
 
-LAB_DIR="/opt/monitoring-lab"
+# Chemins principaux du TP
 LOG_ROOT="/var/log/monitoring-lab"
-
 DATA_DIR="$LOG_ROOT/data"
 ARCHIVE_DIR="$LOG_ROOT/archive"
 TREE_DIR="$LOG_ROOT/tmp/tree"
 
-SERVICES=("fake-api" "log-generator" "noisy-workers")
-
 STUDENT_DIR="/opt/monitoring-lab/student"
 REPORTS_DIR="$STUDENT_DIR/reports"
-LATEST_LINK="$REPORTS_DIR/latest"
-
 APP_LOG="$LOG_ROOT/app/student-monitor.log"
 
-: "${LAB_KILL_HOGS:=0}"
+# Par defaut, le script ne tue aucun processus.
+# Pour tester le kill: sudo LAB_KILL_HOGS=1 ./monitor.sh
+LAB_KILL_HOGS="${LAB_KILL_HOGS:-0}"
 
-main() {
-  require_cmd grep
-  require_cmd awk
-  require_cmd sed
-  require_cmd find
-  require_cmd xargs
-  require_cmd ps
-  require_cmd systemctl
-  require_cmd journalctl
-  require_cmd gzip
-  require_cmd sort
-  require_cmd head
-  require_cmd wc
+# Services a surveiller
+SERVICES="fake-api log-generator noisy-workers"
 
-  ensure_dir "$STUDENT_DIR"
-  ensure_dir "$REPORTS_DIR"
-  ensure_dir "$(dirname "$APP_LOG")"
+echo "===== Student monitor ====="
+echo "Debut       : $(date '+%F %T')"
+echo "Machine     : $(hostname)"
+echo "Utilisateur : $(id -un)"
 
-  local run_dir
-  run_dir="$(make_run_dir "$REPORTS_DIR")"
-  ensure_dir "$run_dir"
-  update_latest_symlink "$run_dir" "$LATEST_LINK"
+echo "[1/9] Verification des commandes utiles"
+for cmd in grep awk sed find xargs ps systemctl journalctl gzip sort head wc; do
+  require_cmd "$cmd"
+done
 
-  log_info "student-monitor start run_dir=$run_dir" | tee -a "$APP_LOG"
+echo "[2/9] Preparation des dossiers de rapport"
+mkdir -p "$REPORTS_DIR"
+mkdir -p "$(dirname "$APP_LOG")"
 
-  check_services "$run_dir"
-  collect_journald_extract "$run_dir"
-  collect_process_snapshot "$run_dir"
-  process_datasets "$run_dir"
-  explore_tree "$run_dir"
+RUN_ID="$(date '+%Y%m%d-%H%M%S')"
+RUN_DIR="$REPORTS_DIR/run-$RUN_ID"
+LATEST_LINK="$REPORTS_DIR/latest"
 
-  write_report_md "$run_dir"
+mkdir -p "$RUN_DIR"
+rm -rf "$LATEST_LINK"
+ln -s "$RUN_DIR" "$LATEST_LINK"
 
-  log_info "student-monitor done run_dir=$run_dir" | tee -a "$APP_LOG"
-}
+log_info "start run_dir=$RUN_DIR" | tee -a "$APP_LOG"
 
-check_services() {
-  local run_dir="$1"
-  local out="$run_dir/services_status.txt"
-  : > "$out"
+echo "[3/9] Etat des services systemd"
+SERVICES_REPORT="$RUN_DIR/services_status.txt"
+: > "$SERVICES_REPORT"
 
-  for svc in "${SERVICES[@]}"; do
-    local state
-    state="$(systemctl is-active "$svc" 2>/dev/null || true)"
-    echo "$(timestamp) service=$svc state=$state" | tee -a "$APP_LOG" >> "$out"
+for service in $SERVICES; do
+  state="$(systemctl is-active "$service" 2>/dev/null || true)"
+  echo "$(date '+%F %T') service=$service state=$state" | tee -a "$SERVICES_REPORT"
 
-    if [[ "$state" != "active" ]]; then
-      log_warn "service not active: $svc (state=$state)" | tee -a "$APP_LOG"
-      systemctl status "$svc" --no-pager > "$run_dir/systemctl_status_${svc}.txt" 2>&1 || true
-      journalctl -u "$svc" -n 200 --no-pager > "$run_dir/journal_${svc}_last200.txt" 2>&1 || true
-    fi
-  done
-}
+  if [[ "$state" != "active" ]]; then
+    log_warn "service non actif: $service ($state)" | tee -a "$APP_LOG"
+    systemctl status "$service" --no-pager > "$RUN_DIR/systemctl_status_${service}.txt" 2>&1 || true
+    journalctl -u "$service" -n 200 --no-pager > "$RUN_DIR/journal_${service}_last200.txt" 2>&1 || true
+  fi
+done
 
-collect_journald_extract() {
-  local run_dir="$1"
-  local out="$run_dir/journald_extract.txt"
-  : > "$out"
+echo "[4/9] Extraction journald"
+{
+  echo "== log-generator =="
+  journalctl -u log-generator -n 200 --no-pager || true
+  echo
+  echo "== fake-api =="
+  journalctl -u fake-api -n 200 --no-pager || true
+} > "$RUN_DIR/journald_extract.txt" 2>&1
 
-  {
-    echo "== journalctl -u log-generator (last 200) =="
-    journalctl -u log-generator -n 200 --no-pager || true
-    echo
-    echo "== journalctl -u fake-api (last 200) =="
-    journalctl -u fake-api -n 200 --no-pager || true
-  } > "$out" 2>&1
+grep -E "ERROR|CRITICAL" "$RUN_DIR/journald_extract.txt" \
+  > "$RUN_DIR/journald_errors_critical.txt" || true
 
-  {
-    echo "== filtered (ERROR|CRITICAL) =="
-    grep -E 'ERROR|CRITICAL' "$out" || true
-  } > "$run_dir/journald_errors_critical.txt"
-}
+echo "[5/9] Processus et hogs CPU"
+ps aux --sort=-%cpu | head -n 20 > "$RUN_DIR/top_cpu.txt"
+ps aux --sort=-%mem | head -n 20 > "$RUN_DIR/top_mem.txt"
+ps -eo pid,ni,pcpu,pmem,comm,args > "$RUN_DIR/ps_snapshot.txt"
 
-collect_process_snapshot() {
-  local run_dir="$1"
+grep "cpu-hog.sh" "$RUN_DIR/ps_snapshot.txt" > "$RUN_DIR/hogs_found.txt" || true
 
-  ps aux --sort=-%cpu | head -n 20 > "$run_dir/top_cpu.txt"
-  ps aux --sort=-%mem | head -n 20 > "$run_dir/top_mem.txt"
+if [[ "$LAB_KILL_HOGS" == "1" ]]; then
+  # On choisit le processus hog qui consomme le plus de CPU.
+  HOG_PID="$(awk '/cpu-hog\.sh/ {print $1, $3}' "$RUN_DIR/ps_snapshot.txt" \
+    | sort -k2,2nr \
+    | head -n 1 \
+    | awk '{print $1}')"
 
-  # PID, nice, cpu, mem, command, args
-  ps -eo pid=,ni=,pcpu=,pmem=,comm=,args= > "$run_dir/ps_snapshot.txt"
-
-  awk '
-    /cpu-hog\.sh/ {
-      printf "pid=%s nice=%s cpu=%s mem=%s comm=%s args=%s\n", $1, $2, $3, $4, $5, $0
-    }
-  ' "$run_dir/ps_snapshot.txt" > "$run_dir/hogs_found.txt" || true
-
-  if [[ "${LAB_KILL_HOGS}" == "1" ]]; then
-    kill_one_hog "$run_dir"
+  if [[ -n "${HOG_PID:-}" ]]; then
+    echo "PID tue: $HOG_PID" > "$RUN_DIR/hog_kill.txt"
+    log_warn "kill du hog PID=$HOG_PID" | tee -a "$APP_LOG"
+    kill -TERM "$HOG_PID" 2>>"$APP_LOG" || true
   else
-    log_info "LAB_KILL_HOGS=0 (no kill)" | tee -a "$APP_LOG"
+    echo "Aucun hog trouve" > "$RUN_DIR/hog_kill.txt"
   fi
-}
+else
+  echo "Mode observation uniquement. LAB_KILL_HOGS=0" > "$RUN_DIR/hog_kill.txt"
+fi
 
-kill_one_hog() {
-  local run_dir="$1"
-  local snapshot="$run_dir/ps_snapshot.txt"
-  local picked="$run_dir/hog_kill_target.txt"
+echo "[6/9] Analyse de data/app.log"
+APP_LOG_DATA="$DATA_DIR/app.log"
+APP_SUMMARY="$RUN_DIR/app_log_summary.txt"
 
-  # Pick the hog with highest %CPU (field 3), store PID
-  awk '
-    /cpu-hog\.sh/ { print $1, $3 }
-  ' "$snapshot" | sort -k2,2nr | head -n 1 > "$picked" || true
-
-  if [[ ! -s "$picked" ]]; then
-    log_warn "LAB_KILL_HOGS=1 but no hog found" | tee -a "$APP_LOG"
-    return 0
-  fi
-
-  local pid
-  pid="$(awk '{print $1}' "$picked")"
-  log_warn "LAB_KILL_HOGS=1 killing hog pid=$pid" | tee -a "$APP_LOG"
-  kill -TERM "$pid" 2>>"$APP_LOG" || true
-  sleep 1
-  kill -KILL "$pid" 2>>"$APP_LOG" || true
-}
-
-process_datasets() {
-  local run_dir="$1"
-  summarize_app_log "$run_dir"
-  summarize_metrics_csv "$run_dir"
-  summarize_events_jsonl "$run_dir"
-  check_archives "$run_dir"
-}
-
-summarize_app_log() {
-  local run_dir="$1"
-  local src="$DATA_DIR/app.log"
-  local out="$run_dir/app_log_summary.txt"
-
-  if [[ ! -f "$src" ]]; then
-    echo "missing_file=$src" > "$out"
-    log_warn "missing dataset: $src" | tee -a "$APP_LOG"
-    return 0
-  fi
-
+if [[ -f "$APP_LOG_DATA" ]]; then
   {
-    echo "source=$src"
-    echo "lines_total=$(wc -l < "$src")"
+    echo "source=$APP_LOG_DATA"
+    echo "lignes_total=$(wc -l < "$APP_LOG_DATA")"
     echo
-    echo "== count by level =="
-    awk '{print $3}' "$src" | sort | awk '{c[$1]++} END{for (k in c) printf "%s %d\n", k, c[k]}' | sort
+    echo "== Nombre par niveau =="
+    awk '{print $3}' "$APP_LOG_DATA" | sort | uniq -c | sort -nr
     echo
-    echo "== top 10 hosts =="
-    awk '{print $2}' "$src" | sort | awk '{c[$1]++} END{for (k in c) printf "%d %s\n", c[k], k}' | sort -nr | head -n 10
+    echo "== Top 10 hosts =="
+    awk '{print $2}' "$APP_LOG_DATA" | sort | uniq -c | sort -nr | head -n 10
     echo
-    echo "== top 10 users =="
-    awk '{print $5}' "$src" | sort | awk '{c[$1]++} END{for (k in c) printf "%d %s\n", c[k], k}' | sort -nr | head -n 10
+    echo "== Top 10 users =="
+    awk '{print $5}' "$APP_LOG_DATA" | sort | uniq -c | sort -nr | head -n 10
     echo
-    echo "password_occurrences=$(grep -c 'password=' "$src" || true)"
-    echo "token_occurrences=$(grep -c 'token=' "$src" || true)"
-    echo "status_500_occurrences=$(grep -c 'status=500' "$src" || true)"
-  } > "$out"
+    echo "password=$(grep -c 'password=' "$APP_LOG_DATA" || true)"
+    echo "token=$(grep -c 'token=' "$APP_LOG_DATA" || true)"
+    echo "status_500=$(grep -c 'status=500' "$APP_LOG_DATA" || true)"
+  } > "$APP_SUMMARY"
 
-  # Exemple de masquage "sed" (sans détruire l'original)
-  sed -E 's/(password=)[^" ]+/\1***REDACTED***/g; s/(token=)[^" ]+/\1***REDACTED***/g' \
-    "$src" > "$run_dir/app_log_redacted.log"
-}
+  sed -E 's/(password=)[^" ]+/\1***MASQUE***/g; s/(token=)[^" ]+/\1***MASQUE***/g' \
+    "$APP_LOG_DATA" > "$RUN_DIR/app_log_masque.log"
+else
+  echo "Fichier manquant: $APP_LOG_DATA" > "$APP_SUMMARY"
+fi
 
-summarize_metrics_csv() {
-  local run_dir="$1"
-  local src="$DATA_DIR/metrics.csv"
-  local out="$run_dir/metrics_summary.txt"
-  local staging_lines
+echo "[7/9] Analyse de data/metrics.csv"
+METRICS_FILE="$DATA_DIR/metrics.csv"
+METRICS_SUMMARY="$RUN_DIR/metrics_summary.txt"
 
-  if [[ ! -f "$src" ]]; then
-    echo "missing_file=$src" > "$out"
-    log_warn "missing dataset: $src" | tee -a "$APP_LOG"
-    return 0
-  fi
-
-  staging_lines="$(awk -F, 'NR>1 && $8=="staging"{c++} END{print c+0}' "$src")"
-
+if [[ -f "$METRICS_FILE" ]]; then
   {
-    echo "source=$src"
-    echo "lines_total=$(wc -l < "$src")"
+    echo "source=$METRICS_FILE"
+    echo "lignes_total=$(wc -l < "$METRICS_FILE")"
+    echo "lignes_staging=$(awk -F, 'NR>1 && $8=="staging" {count++} END {print count+0}' "$METRICS_FILE")"
     echo
-    echo "staging_lines=$staging_lines"
+    echo "== Top 10 hosts par CPU moyen =="
+    awk -F, 'NR>1 {sum[$2]+=$3; count[$2]++} END {for (host in count) print sum[host]/count[host], host}' "$METRICS_FILE" \
+      | sort -nr \
+      | head -n 10
     echo
-    echo "== top 10 hosts by avg cpu_pct =="
-    awk -F, '
-      NR==1{next}
-      {host=$2; cpu=$3+0; sum[host]+=cpu; cnt[host]++}
-      END{for (h in cnt) printf "%.2f %s\n", sum[h]/cnt[h], h}
-    ' "$src" | sort -nr | head -n 10
+    echo "== Top 10 hosts par latence moyenne =="
+    awk -F, 'NR>1 {sum[$2]+=$7; count[$2]++} END {for (host in count) print sum[host]/count[host], host}' "$METRICS_FILE" \
+      | sort -nr \
+      | head -n 10
     echo
-    echo "== top 10 hosts by avg latency_ms =="
-    awk -F, '
-      NR==1{next}
-      {host=$2; lat=$7+0; sum[host]+=lat; cnt[host]++}
-      END{for (h in cnt) printf "%.2f %s\n", sum[h]/cnt[h], h}
-    ' "$src" | sort -nr | head -n 10
+    echo "== Anomalies CPU/MEM (exemples) =="
+    awk -F, 'NR>1 && ($3 >= 95 || $4 >= 95) {print; count++; if (count == 10) exit}' "$METRICS_FILE"
     echo
-    echo "== anomalies (cpu>=95 OR mem>=95) count + examples =="
-    awk -F, '
-      NR==1{next}
-      ($3+0>=95 || $4+0>=95){c++; if (c<=10) print}
-      END{print "count=" c+0}
-    ' "$src"
-  } > "$out"
-}
+    echo "nombre_anomalies=$(awk -F, 'NR>1 && ($3 >= 95 || $4 >= 95) {count++} END {print count+0}' "$METRICS_FILE")"
+  } > "$METRICS_SUMMARY"
+else
+  echo "Fichier manquant: $METRICS_FILE" > "$METRICS_SUMMARY"
+fi
 
-summarize_events_jsonl() {
-  local run_dir="$1"
-  local src="$DATA_DIR/events.jsonl"
-  local out="$run_dir/events_summary.txt"
+echo "[8/9] Analyse de data/events.jsonl et archives"
+EVENTS_FILE="$DATA_DIR/events.jsonl"
+EVENTS_SUMMARY="$RUN_DIR/events_summary.txt"
 
-  if [[ ! -f "$src" ]]; then
-    echo "missing_file=$src" > "$out"
-    log_warn "missing dataset: $src" | tee -a "$APP_LOG"
-    return 0
-  fi
-
+if [[ -f "$EVENTS_FILE" ]]; then
   {
-    echo "source=$src"
-    echo "lines_total=$(wc -l < "$src")"
+    echo "source=$EVENTS_FILE"
+    echo "lignes_total=$(wc -l < "$EVENTS_FILE")"
     echo
-    echo "== count by severity =="
-    grep -oE '"severity":"[^"]+"' "$src" | awk -F\" '{print $4}' | sort | awk '{c[$1]++} END{for (k in c) printf "%s %d\n", k, c[k]}' | sort
+    echo "== Nombre par severity =="
+    grep -oE '"severity":"[^"]+"' "$EVENTS_FILE" \
+      | sed 's/"severity":"//; s/"//' \
+      | sort \
+      | uniq -c \
+      | sort -nr
     echo
-    echo "== top 10 hosts =="
-    grep -oE '"host":"[^"]+"' "$src" | awk -F\" '{print $4}' | sort | awk '{c[$1]++} END{for (k in c) printf "%d %s\n", c[k], k}' | sort -nr | head -n 10
-  } > "$out"
-}
+    echo "== Top 10 hosts =="
+    grep -oE '"host":"[^"]+"' "$EVENTS_FILE" \
+      | sed 's/"host":"//; s/"//' \
+      | sort \
+      | uniq -c \
+      | sort -nr \
+      | head -n 10
+  } > "$EVENTS_SUMMARY"
+else
+  echo "Fichier manquant: $EVENTS_FILE" > "$EVENTS_SUMMARY"
+fi
 
-check_archives() {
-  local run_dir="$1"
-  local out="$run_dir/archive_check.txt"
+{
+  echo "Verification des archives gzip"
+  find "$ARCHIVE_DIR" -name "*.gz" -print0 | xargs -0 gzip -t
+  echo "OK"
+} > "$RUN_DIR/archive_check.txt" 2>&1 || echo "FAIL" >> "$RUN_DIR/archive_check.txt"
 
-  if [[ ! -d "$ARCHIVE_DIR" ]]; then
-    echo "missing_dir=$ARCHIVE_DIR" > "$out"
-    log_warn "missing dir: $ARCHIVE_DIR" | tee -a "$APP_LOG"
-    return 0
-  fi
+echo "[9/9] Exploration de l'arborescence tmp/tree"
+find "$TREE_DIR" -type f -name "*.bak" -print0 \
+  | xargs -0 -r -n 1 echo > "$RUN_DIR/tree_bak_files.txt"
 
-  {
-    echo "archive_dir=$ARCHIVE_DIR"
-    echo "== gzip -t results =="
-    find "$ARCHIVE_DIR" -name '*.gz' -print0 | xargs -0 gzip -t
-    echo "OK"
-  } > "$out" 2>&1 || {
-    echo "FAIL (see errors above)" >> "$out"
-    log_warn "archive check failed (see $out)" | tee -a "$APP_LOG"
-  }
-}
+find "$TREE_DIR" -type f -mtime +7 -print0 \
+  | xargs -0 -r -n 1 echo > "$RUN_DIR/tree_mtime_plus7.txt"
 
-explore_tree() {
-  local run_dir="$1"
+find "$TREE_DIR" -type f -print0 \
+  | xargs -0 -r grep -Hn "SECRET=" > "$RUN_DIR/tree_secret_hits.txt" 2>/dev/null || true
 
-  if [[ ! -d "$TREE_DIR" ]]; then
-    echo "missing_dir=$TREE_DIR" > "$run_dir/tree_missing.txt"
-    log_warn "missing dir: $TREE_DIR" | tee -a "$APP_LOG"
-    return 0
-  fi
+find "$TREE_DIR" -type f -print0 \
+  | xargs -0 -r grep -Hn "DEBUG=true" > "$RUN_DIR/tree_debug_hits.txt" 2>/dev/null || true
 
-  find "$TREE_DIR" -type f -name '*.bak' -print0 \
-    | xargs -0 -I{} echo "{}" > "$run_dir/tree_bak_files.txt"
-  echo "count=$(wc -l < "$run_dir/tree_bak_files.txt")" > "$run_dir/tree_bak_summary.txt"
-  head -n 20 "$run_dir/tree_bak_files.txt" >> "$run_dir/tree_bak_summary.txt" || true
+{
+  echo "# Rapport de monitoring"
+  echo
+  echo "- Date: $(date -Is)"
+  echo "- Dossier: $RUN_DIR"
+  echo
+  echo "## Fichiers principaux"
+  echo "- services_status.txt"
+  echo "- journald_extract.txt"
+  echo "- top_cpu.txt / top_mem.txt"
+  echo "- app_log_summary.txt"
+  echo "- metrics_summary.txt"
+  echo "- events_summary.txt"
+  echo "- archive_check.txt"
+  echo "- tree_bak_files.txt"
+  echo "- tree_secret_hits.txt"
+} > "$RUN_DIR/REPORT.md"
 
-  find "$TREE_DIR" -type f -mtime +7 -print0 \
-    | xargs -0 -I{} echo "{}" > "$run_dir/tree_mtime_plus7.txt"
-  echo "count=$(wc -l < "$run_dir/tree_mtime_plus7.txt")" > "$run_dir/tree_mtime_plus7_summary.txt"
-  head -n 20 "$run_dir/tree_mtime_plus7.txt" >> "$run_dir/tree_mtime_plus7_summary.txt" || true
-
-  find "$TREE_DIR" -type f -print0 \
-    | xargs -0 grep -Hn 'SECRET=' > "$run_dir/tree_secret_hits.txt" 2>/dev/null || true
-
-  find "$TREE_DIR" -type f -print0 \
-    | xargs -0 grep -Hn 'DEBUG=true' > "$run_dir/tree_debug_hits.txt" 2>/dev/null || true
-}
-
-write_report_md() {
-  local run_dir="$1"
-  local out="$run_dir/REPORT.md"
-
-  {
-    echo "# Student Monitor Report"
-    echo
-    echo "- generated_at: $(date -Is)"
-    echo "- run_dir: $run_dir"
-    echo
-    echo "## Key files"
-    echo "- services: services_status.txt"
-    echo "- journald: journald_extract.txt, journald_errors_critical.txt"
-    echo "- process: top_cpu.txt, top_mem.txt, hogs_found.txt"
-    echo "- datasets: app_log_summary.txt, metrics_summary.txt, events_summary.txt, archive_check.txt"
-    echo "- tree: tree_bak_summary.txt, tree_mtime_plus7_summary.txt, tree_secret_hits.txt, tree_debug_hits.txt"
-  } > "$out"
-}
-
-main "$@"
+echo "Fin         : $(date '+%F %T')"
+echo "Rapport     : $RUN_DIR"
+log_info "done run_dir=$RUN_DIR" | tee -a "$APP_LOG"
