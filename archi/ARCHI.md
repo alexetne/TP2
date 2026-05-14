@@ -13,22 +13,22 @@ flowchart LR
   S --> M[monitor.sh]
 
   subgraph inputs[Inputs]
-    J[journald\njournalctl -u fake-api/log-generator]
-    D1[/var/log/monitoring-lab/data/app.log]
-    D2[/var/log/monitoring-lab/data/metrics.csv]
-    D3[/var/log/monitoring-lab/data/events.jsonl]
-    A[/var/log/monitoring-lab/archive/*.gz]
-    TR[/var/log/monitoring-lab/tmp/tree/]
-    P[process table\nps]
-    U[systemctl status/is-active]
+    J["journald<br/>journalctl -u fake-api/log-generator"]
+    D1["/var/log/monitoring-lab/data/app.log"]
+    D2["/var/log/monitoring-lab/data/metrics.csv"]
+    D3["/var/log/monitoring-lab/data/events.jsonl"]
+    A["/var/log/monitoring-lab/archive/*.gz"]
+    TR["/var/log/monitoring-lab/tmp/tree/"]
+    P["process table<br/>ps"]
+    U["systemctl status/is-active"]
   end
 
   inputs --> M
 
   subgraph outputs[Outputs]
-    R[/opt/monitoring-lab/student/reports/run-.../]
-    L[/opt/monitoring-lab/student/reports/latest/]
-    AL[/var/log/monitoring-lab/app/student-monitor.log]
+    R["/opt/monitoring-lab/student/reports/run-.../"]
+    L["/opt/monitoring-lab/student/reports/latest/"]
+    AL["/var/log/monitoring-lab/app/student-monitor.log"]
   end
 
   M --> R
@@ -88,4 +88,3 @@ Liste ici tous les fichiers produits (nom + rôle), par exemple :
 - `journald_extract.txt` : logs journald bruts
 - `metrics_summary.txt` : agrégats csv
 - `tree_secret_hits.txt` : occurrences `SECRET=`
-
