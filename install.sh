@@ -224,10 +224,8 @@ done
 # Crée des sous-dossiers (profondeur)
 for d in $(seq 1 "$LAB_TREE_DIRS"); do
   base="$TREE_DIR/dir_$d"
-  cur="$base"
   for depth in $(seq 1 "$LAB_TREE_DEPTH"); do
-    cur="$cur/sub_$depth"
-    mkdir -p "$cur"
+    mkdir -p "$base/sub_$depth"
   done
 done
 
