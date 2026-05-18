@@ -1,36 +1,3 @@
-# Dossier Etudiant - TP Monitoring Shell (1h a 2h)
-
-## Objectif du TP
-
-Vous devez creer un script shell simple qui observe la machine de TP, extrait quelques informations utiles, puis ecrit un petit dossier de rapport.
-
-Le but n'est pas de faire un outil parfait. Le but est de manipuler correctement :
-
-- `systemctl` et `journalctl`
-- `ps`, `top` ou `htop`
-- `grep`, `awk`, `sed`
-- `find`, `xargs`
-- les pipes `|` et redirections `>`, `>>`, `2>&1`
-
-## Contexte de la machine
-
-Apres installation d'ubuntu lancez la commande `sudo LAB_DATA_LINES=400 LAB_METRICS_ROWS=300 LAB_TREE_FILES=600 ./install.sh`, la machine contient :
-
-- Services : `fake-api`, `log-generator`, `noisy-workers`
-- Logs principaux :
-  - `/var/log/monitoring-lab/data/app.log`
-  - `/var/log/monitoring-lab/data/metrics.csv`
-  - `/var/log/monitoring-lab/tmp/tree/`
-
-Verification rapide :
-
-```bash
-systemctl status fake-api log-generator noisy-workers
-ls -lah /var/log/monitoring-lab/data/
-```
-
-## Travail demande
-
 Creer le dossier de travail :
 
 ```bash

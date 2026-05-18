@@ -1,80 +1,73 @@
-# Dossier Professeur — TP Monitoring & Traitement (Corrigé & Grille)
+# Dossier Professeur - TP Monitoring Shell (1h a 2h)
 
-## Intention pédagogique
+## Positionnement
 
-Ce TP force l’usage “Unix” de :
+Le sujet a ete reduit pour tenir en 1h a 2h avec des etudiants de 1re/2e annee IT.
 
-- traitement de texte en flux : `grep | awk | sed`
-- exploration & batch robuste : `find -print0 | xargs -0`
-- pipes/redirections (stdout/stderr)
-- inspection process : `ps`, observation `top/htop`, gestion de priorité `nice`, arrêt `kill`
-- exploitation systemd : `systemctl`, `journalctl`, création service/timer
+Ce que le TP couvre vraiment :
 
-## Contexte installé (machine)
+- lecture de services avec `systemctl`
+- extraction de logs avec `journalctl`
+- observation processus avec `ps`, `top` ou `htop`
+- traitement texte simple avec `grep`, `awk`, `sed`
+- exploration de fichiers avec `find` et `xargs`
+- redirections et pipes
 
-- Dossiers : `/opt/monitoring-lab/`, `/var/log/monitoring-lab/`
-- Services : `fake-api`, `log-generator`, `noisy-workers`
-- Datasets : `data/app.log`, `data/metrics.csv`, `data/events.jsonl`, `archive/*.gz`, `tmp/tree/`
+Ce qui passe en bonus :
 
-Contrôles :
-```bash
-systemctl status fake-api log-generator noisy-workers
-ls -lah /var/log/monitoring-lab/data
-```
+- service/timer systemd etudiant
+- lien `reports/latest`
+- `kill` automatise
+- JSONL, archives `.gz`, rapports avances
 
-## Corrigé fourni
+## Livrable attendu
 
-Corrigé prêt à déployer :
+Un dossier `/opt/monitoring-lab/student/` contenant :
 
-- `correction/monitor.sh` + `correction/lib.sh`
-- `correction/correction.sh` (installe dans `/opt/monitoring-lab/student/` + timer/service)
+- `monitor.sh`
+- `reports/run-.../services.txt`
+- `reports/run-.../journald.txt`
+- `reports/run-.../journald_errors.txt`
+- `reports/run-.../top_cpu.txt`
+- `reports/run-.../hogs.txt`
+- `reports/run-.../app_summary.txt`
+- `reports/run-.../app_redacted.log`
+- `reports/run-.../metrics_summary.txt`
+- `reports/run-.../tree_bak.txt`
+- `reports/run-.../tree_secret.txt`
 
-Déploiement :
+Optionnel :
+
+- `REPORT.md`
+- `archi/ARCHI.md`
+- `student-monitor.service`
+- `student-monitor.timer`
+
+## Corrige fourni
+
+Le corrige installe un script plus complet que le minimum, mais reste lineaire et lisible.
+
 ```bash
 sudo bash correction/correction.sh
 journalctl -u student-monitor.service -n 100 --no-pager
 ls -lah /opt/monitoring-lab/student/reports/latest
 ```
 
-## Grille de correction (suggestion)
+## Grille rapide
 
-### 1) Robustesse / Qualité shell
+- 4 pts : creation correcte du dossier `reports/run-...`
+- 4 pts : verification des services avec `systemctl is-active`
+- 4 pts : extraction `journalctl` + filtrage `grep -E`
+- 4 pts : analyse `app.log` avec `wc`, `grep`, `awk`, `sed`
+- 3 pts : analyse simple `metrics.csv` avec `awk -F,`
+- 3 pts : usage correct de `find` + `xargs`
+- 2 pts : proprete generale du script (`bash -n`, variables, chemins)
 
-- `set -euo pipefail` présent
-- variables centralisées (paths, services)
-- script rejouable (idempotence)
-- erreurs gérées (fichiers manquants → warning + rapport, pas crash “gratuit”)
+Total : 24 pts, a ramener sur 20 si besoin.
 
-### 2) Pipeline de traitement
+## Points a surveiller
 
-- `grep/awk/sed` utilisés pour extractions/agrégations réelles
-- pas de “cat inutile” (usage de pipes)
-- redirections correctes (au moins un exemple `2>&1` ou fichier stderr)
-
-### 3) `find/xargs`
-
-- usage de `-print0` et `xargs -0`
-- production de rapports (comptes + exemples)
-
-### 4) Process / nice / kill
-
-- snapshot `ps` (top CPU/mem)
-- identification de processus cibles (ex: hogs)
-- kill implémenté en mode sécurisé (désactivé par défaut, activable via variable)
-
-### 5) systemd / journald
-
-- `student-monitor.service` + `student-monitor.timer` fonctionnels
-- diagnostic via `journalctl -u ...` maîtrisé
-- rapports produits à intervalle régulier
-
-## Ce qu’on attend dans le dossier “archi”
-
-Exiger un dossier `archi/` dans le rendu étudiant :
-
-- un diagramme Mermaid (flux global + points d’entrée)
-- une explication “manuelle” : *commande → fichier → interprétation*
-- un inventaire des outputs (noms de fichiers, où les trouver)
-
-Template fourni : `archi/ARCHI.md`.
-
+- Les etudiants ne doivent pas modifier les fichiers sources dans `/var/log/monitoring-lab/data/`.
+- `kill` doit rester manuel ou bonus, pas obligatoire.
+- `top`/`htop` peut etre valide par observation pendant la seance.
+- Le dossier d'architecture doit rester court : un schema et quelques phrases suffisent.
