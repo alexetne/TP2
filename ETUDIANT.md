@@ -170,7 +170,7 @@ Fichier :
 ```
 
 Creer `metrics_summary.txt` contenant :
-
+log-generator
 - nombre total de lignes
 - nombre de lignes ou `cpu_pct >= 95`
 - les 5 premieres lignes anormales
